@@ -84,7 +84,8 @@ class InvalidEndpointPathException(Exception):
 
 
 class EndPointHandlerProxy:
-    def __init__(self, func, parent):
+    def __init__(self, name, func, parent):
+        self.name = name
         self.func = func
         self.parent = parent
         assert callable(func)
@@ -95,43 +96,79 @@ class EndPointHandlerProxy:
     def evaluate_attribute_kwargs(self):
         return self.parent.evaluate_attribute_kwargs()
 
+    def children(self):
+        return {}
+
 
 def setup_endpoint_proxies(parent: 'PagePart') -> Dict[str, EndPointHandlerProxy]:
     return Namespace({
-        k: EndPointHandlerProxy(v, parent=parent)
+        k: EndPointHandlerProxy(k, v, parent=parent)
         for k, v in parent.endpoint.items()
     })
+
+
+def get_parents(node):
+    pass
+
+
+def traverse(node, accumulated=dict(), parents=[]):
+    result = dict(accumulated)
+    children = node.children() if hasattr(node, 'children') else {}
+    for child in children.values():
+        if child:
+            child_paths = traverse(child, accumulated=result, parents=parents + [node])
+            result.update(child_paths)
+
+    nodes = parents + [node]
+    path = ''
+    while path in result:
+        tmp = nodes.pop()
+        if hasattr(tmp, 'name'):
+            path = tmp.name + ('/' + path if path is not '' else '')
+    result[path] = node
+
+    return result
+
+
+def get_path(root, child):
+    for path, node in traverse(root).items():
+        if node is child:
+            return path
 
 
 def find_target(*, path, root):
     assert path.startswith(DISPATCH_PATH_SEPARATOR)
     p = path[1:]
-    sentinel = object()
-    next_node = root
-    parents = [root]
+    for other_path, node in traverse(root).items():
+        if p == other_path:
+            return node, get_parents(node)
 
-    # TODO: what if the path is just / ? We can't get to that object as is. If we allow this then it can't work with default_child
-
-    while True:
-        data = {p: sentinel}
-        try:
-            next_node.children
-        except AttributeError:
-            raise InvalidEndpointPathException(f"Invalid path {path}.\n{next_node} (of type {type(next_node)} has no attribute children so can't be traversed.\nParents so far: {parents}.\nPath left: {p}")
-        children = next_node.children()
-        assert children is not None
-        try:
-            foo = group_paths_by_children(children=children, data=data)
-        except GroupPathsByChildrenError:
-            raise InvalidEndpointPathException(f"Invalid path {path}.\nchildren does not contain what we're looking for, these are the keys available: {list(children.keys())}.\nParents so far: {parents}.\nPath left: {p}")
-
-        assert len(foo) == 1
-        name, rest = foo.popitem()
-        p, _ = rest.popitem()
-        next_node = children[name]
-        if not p:
-            return next_node, parents
-        parents.append(next_node)
+    # sentinel = object()
+    # next_node = root
+    # parents = [root]
+    #
+    # # TODO: what if the path is just / ? We can't get to that object as is. If we allow this then it can't work with default_child
+    #
+    # while True:
+    #     data = {p: sentinel}
+    #     try:
+    #         next_node.children
+    #     except AttributeError:
+    #         raise InvalidEndpointPathException(f"Invalid path {path}.\n{next_node} (of type {type(next_node)} has no attribute children so can't be traversed.\nParents so far: {parents}.\nPath left: {p}")
+    #     children = next_node.children()
+    #     assert children is not None
+    #     try:
+    #         foo = group_paths_by_children(children=children, data=data)
+    #     except GroupPathsByChildrenError:
+    #         raise InvalidEndpointPathException(f"Invalid path {path}.\nchildren does not contain what we're looking for, these are the keys available: {list(children.keys())}.\nParents so far: {parents}.\nPath left: {p}")
+    #
+    #     assert len(foo) == 1
+    #     name, rest = foo.popitem()
+    #     p, _ = rest.popitem()
+    #     next_node = children[name]
+    #     if not p:
+    #         return next_node, parents
+    #     parents.append(next_node)
 
 
 def perform_ajax_dispatch(*, root, path, value):
@@ -318,19 +355,20 @@ class PagePart(RefinableObject):
             assert self.name, f'{self} is missing a name, but it was asked about its path'
             return ''
 
+    def root(self):
+        node = self
+        while node.parent is not None:
+            node = node.parent
+        return node
+
     def path(self) -> str:
         assert self._is_bound
-        if self.default_child:
-            if self.parent is not None:
-                return self.parent.path()
-            else:
-                return ''
+        candidates = traverse(self.root()).items()
+        for path, node in candidates:
+            if node is self:
+                return path
 
-        if self.parent is not None:
-            return path_join(self.parent.path(), self.name)
-        else:
-            assert self.name, f'{self} is missing a name, but it was asked about its path'
-            return self.name
+        assert False, f"Path not found(!) (Searched for self in {traverse(self.root())!r}"
 
     def endpoint_path(self):
         return DISPATCH_PREFIX + self.path()
